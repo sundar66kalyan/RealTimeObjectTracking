@@ -1,45 +1,100 @@
+"""
+track_save.py
+-------------
+Runs YOLOv8 + ByteTrack on a video and saves the annotated output.
+Preserves original resolution. Press Q to quit early.
+
+Usage:
+    python src/track_save.py
+    python src/track_save.py --source data/highway.mp4 --output outputs/tracked.mp4
+"""
+
+import argparse
+import os
+import sys
 import cv2
 from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")
+VEHICLE_CLASSES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
 
-cap = cv2.VideoCapture("data/traffic1.mp4")
 
-width = int(cap.get(3))
-height = int(cap.get(4))
-fps = int(cap.get(cv2.CAP_PROP_FPS))
+def save_tracked_video(source: str, output: str, model_path: str) -> None:
 
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
 
-out = cv2.VideoWriter(
-    'outputs/tracked.mp4',
-    fourcc,
-    fps,
-    (width, height)
-)
+    model = YOLO(model_path)
+    cap   = cv2.VideoCapture(source)
 
-while True:
+    if not cap.isOpened():
+        print(f"[ERROR] Cannot open video: {source}")
+        sys.exit(1)
 
-    ret, frame = cap.read()
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps    = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    if not ret:
-        break
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output, fourcc, fps, (width, height))
 
-    results = model.track(
-        frame,
-        persist=True,
-        tracker="bytetrack.yaml"
-    )
+    print(f"[INFO]  Source    : {source}")
+    print(f"[INFO]  Output    : {output}")
+    print(f"[INFO]  Resolution: {width}x{height}  |  FPS: {fps}  |  Frames: {total}")
 
-    annotated = results[0].plot()
+    cv2.namedWindow("Saving tracked video  |  Q to stop", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Saving tracked video  |  Q to stop", 1000, 600)
 
-    out.write(annotated)
+    frame_idx  = 0
+    unique_ids: set[int] = set()
 
-    cv2.imshow("Tracking", annotated)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        results  = model.track(
+            frame,
+            persist=True,
+            tracker="bytetrack.yaml",
+            verbose=False,
+            classes=list(VEHICLE_CLASSES.keys()),
+        )
+        annotated = results[0].plot()
 
-cap.release()
-out.release()
-cv2.destroyAllWindows()
+        if results[0].boxes.id is not None:
+            for tid, cls in zip(
+                results[0].boxes.id.cpu().numpy().astype(int),
+                results[0].boxes.cls.cpu().numpy().astype(int),
+            ):
+                if cls in VEHICLE_CLASSES:
+                    unique_ids.add(tid)
+
+        writer.write(annotated)
+        cv2.imshow("Saving tracked video  |  Q to stop", annotated)
+        frame_idx += 1
+
+        # Progress every 30 frames
+        if frame_idx % 30 == 0:
+            pct = frame_idx / max(total, 1) * 100
+            print(f"\r[INFO]  Progress: {pct:.1f}%  ({frame_idx}/{total})", end="", flush=True)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("\n[INFO]  Stopped by user.")
+            break
+
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+
+    print(f"\n[DONE]  Saved : {output}")
+    print(f"[DONE]  Frames: {frame_idx}  |  Unique vehicles: {len(unique_ids)}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", default="data/traffic1.mp4")
+    parser.add_argument("--output", default="outputs/tracked.mp4")
+    parser.add_argument("--model",  default="yolov8n.pt")
+    args = parser.parse_args()
+
+    save_tracked_video(args.source, args.output, args.model)

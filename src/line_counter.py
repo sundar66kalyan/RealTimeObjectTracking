@@ -1,111 +1,118 @@
+"""
+line_counter.py
+---------------
+Counts vehicles crossing a virtual line, tracking direction.
+Vehicles moving DOWN  → Entry count
+Vehicles moving UP    → Exit count
+
+Usage:
+    python src/line_counter.py
+    python src/line_counter.py --source data/highway.mp4 --line 0.60
+"""
+
+import argparse
+import sys
 import cv2
 from ultralytics import YOLO
 
-# Load YOLOv8 model
-model = YOLO("yolov8n.pt")
+VEHICLE_CLASSES = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck"}
+FRAME_SIZE      = (640, 360)
 
-# Open video
-cap = cv2.VideoCapture("data/traffic1.mp4")
 
-# Vehicle classes in COCO
-vehicle_classes = [2, 3, 5, 7]
+def run_line_counter(source: str, model_path: str, line_ratio: float) -> None:
 
-# Store counted IDs
-counted_ids = set()
+    model  = YOLO(model_path)
+    cap    = cv2.VideoCapture(source)
 
-# Counting line position
-line_y = 250
+    if not cap.isOpened():
+        print(f"[ERROR] Cannot open: {source}")
+        sys.exit(1)
 
-cv2.namedWindow(
-    "Vehicle Counter",
-    cv2.WINDOW_NORMAL
-)
+    frame_h   = FRAME_SIZE[1]
+    line_y    = int(frame_h * line_ratio)
+    tolerance = 12
 
-cv2.resizeWindow(
-    "Vehicle Counter",
-    1000,
-    600
-)
+    # Track each ID's previous y-position to determine direction
+    prev_y:    dict[int, float] = {}
+    entry_ids: set[int]         = set()
+    exit_ids:  set[int]         = set()
 
-while True:
+    cv2.namedWindow("Line Counter  |  Q to quit", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Line Counter  |  Q to quit", 1000, 600)
 
-    ret, frame = cap.read()
+    print(f"[INFO]  Line Y : {line_y}px  |  Down = Entry, Up = Exit")
 
-    if not ret:
-        break
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    # Resize for CPU performance
-    frame = cv2.resize(
-        frame,
-        (640, 360)
-    )
+        frame   = cv2.resize(frame, FRAME_SIZE)
+        results = model.track(
+            frame,
+            persist=True,
+            tracker="bytetrack.yaml",
+            verbose=False,
+            classes=list(VEHICLE_CLASSES.keys()),
+        )
+        annotated = results[0].plot()
 
-    results = model.track(
-        frame,
-        persist=True,
-        tracker="bytetrack.yaml",
-        verbose=False
-    )
+        # Counting line
+        cv2.line(annotated, (0, line_y), (FRAME_SIZE[0], line_y), (0, 0, 255), 2)
 
-    annotated = results[0].plot()
+        if results[0].boxes.id is not None:
+            boxes   = results[0].boxes.xyxy.cpu().numpy()
+            ids     = results[0].boxes.id.cpu().numpy().astype(int)
+            classes = results[0].boxes.cls.cpu().numpy().astype(int)
 
-    # Draw counting line
-    cv2.line(
-        annotated,
-        (0, line_y),
-        (640, line_y),
-        (0, 0, 255),
-        3
-    )
+            for box, tid, cls in zip(boxes, ids, classes):
+                if cls not in VEHICLE_CLASSES:
+                    continue
 
-    if results[0].boxes.id is not None:
+                _, y1, _, y2 = box
+                cy = (y1 + y2) / 2
 
-        boxes = results[0].boxes.xyxy.cpu().numpy()
+                if abs(cy - line_y) < tolerance:
+                    if tid in prev_y:
+                        if prev_y[tid] < line_y and cy >= line_y:
+                            # Moving down → Entry
+                            entry_ids.add(tid)
+                        elif prev_y[tid] > line_y and cy <= line_y:
+                            # Moving up → Exit
+                            exit_ids.add(tid)
 
-        ids = results[0].boxes.id.cpu().numpy().astype(int)
+                prev_y[tid] = cy
 
-        classes = results[0].boxes.cls.cpu().numpy().astype(int)
+        # Overlay panel
+        entry = len(entry_ids)
+        exit_ = len(exit_ids)
 
-        for box, track_id, cls in zip(
-            boxes,
-            ids,
-            classes
-        ):
+        cv2.rectangle(annotated, (8, 8), (200, 100), (0, 0, 0), -1)
+        cv2.putText(annotated, f"Entry : {entry}", (14, 35),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
+        cv2.putText(annotated, f"Exit  : {exit_}", (14, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 100, 255), 2)
+        cv2.putText(annotated, f"Net   : {entry - exit_}", (14, 92),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1)
 
-            if cls not in vehicle_classes:
-                continue
+        cv2.imshow("Line Counter  |  Q to quit", annotated)
 
-            x1, y1, x2, y2 = box
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-            center_y = int((y1 + y2) / 2)
+    cap.release()
+    cv2.destroyAllWindows()
 
-            if abs(center_y - line_y) < 10:
+    print(f"\n[DONE]  Entry count : {len(entry_ids)}")
+    print(f"[DONE]  Exit count  : {len(exit_ids)}")
+    print(f"[DONE]  Net traffic : {len(entry_ids) - len(exit_ids)}")
 
-                counted_ids.add(track_id)
 
-    total_count = len(counted_ids)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", default="data/traffic1.mp4")
+    parser.add_argument("--model",  default="yolov8n.pt")
+    parser.add_argument("--line",   type=float, default=0.65)
+    args = parser.parse_args()
 
-    cv2.putText(
-        annotated,
-        f"Vehicle Count: {total_count}",
-        (20, 50),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0, 255, 0),
-        2
-    )
-
-    cv2.imshow(
-        "Vehicle Counter",
-        annotated
-    )
-
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
-
-print(
-    f"Total Vehicles Counted: {len(counted_ids)}"
-)
+    run_line_counter(args.source, args.model, args.line)

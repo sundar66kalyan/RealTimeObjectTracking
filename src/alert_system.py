@@ -1,56 +1,98 @@
-import pandas as pd
+"""
+alert_system.py
+---------------
+Reads the latest history entry and generates a traffic alert.
+Alert levels:
+  HIGH   — ≥ 20 vehicles
+  MEDIUM — ≥ 10 vehicles
+  LOW    — < 10 vehicles
+
+Usage:
+    python src/alert_system.py
+    python src/alert_system.py --total 25
+"""
+
+import argparse
 import os
 from datetime import datetime
 
-# Read latest history
-history_file = "outputs/history/traffic_history.csv"
+import pandas as pd
 
-if not os.path.exists(history_file):
-    print("History file not found.")
-    exit()
 
-history_df = pd.read_csv(history_file)
+HISTORY_FILE = "outputs/history/traffic_history.csv"
+ALERT_FILE   = "outputs/traffic_alerts.csv"
 
-latest = history_df.iloc[-1]
-
-total_vehicles = latest["Total"]
-
-# Alert thresholds
-if total_vehicles >= 20:
-    alert_level = "HIGH TRAFFIC"
-elif total_vehicles >= 10:
-    alert_level = "MEDIUM TRAFFIC"
-else:
-    alert_level = "LOW TRAFFIC"
-
-alert_record = {
-    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "Total Vehicles": total_vehicles,
-    "Alert": alert_level
+THRESHOLDS = {
+    "HIGH":   20,
+    "MEDIUM": 10,
 }
 
-alert_file = "outputs/traffic_alerts.csv"
+COLORS = {
+    "HIGH":   "\033[91m",   # Red
+    "MEDIUM": "\033[93m",   # Yellow
+    "LOW":    "\033[92m",   # Green
+    "RESET":  "\033[0m",
+}
 
-if os.path.exists(alert_file):
 
-    alert_df = pd.read_csv(alert_file)
+def get_alert_level(total: int) -> str:
+    if total >= THRESHOLDS["HIGH"]:
+        return "HIGH"
+    elif total >= THRESHOLDS["MEDIUM"]:
+        return "MEDIUM"
+    return "LOW"
 
-    alert_df = pd.concat(
-        [alert_df, pd.DataFrame([alert_record])],
-        ignore_index=True
-    )
 
-else:
+def generate_alert(total_vehicles: int) -> dict:
+    level = get_alert_level(total_vehicles)
 
-    alert_df = pd.DataFrame([alert_record])
+    record = {
+        "Timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Total Vehicles": int(total_vehicles),
+        "Alert":          level,
+        "Threshold HIGH": THRESHOLDS["HIGH"],
+        "Threshold MED":  THRESHOLDS["MEDIUM"],
+    }
 
-alert_df.to_csv(
-    alert_file,
-    index=False
-)
+    os.makedirs(os.path.dirname(ALERT_FILE), exist_ok=True)
 
-print("\nTraffic Alert Generated")
-print("-" * 30)
-print("Vehicles :", total_vehicles)
-print("Status   :", alert_level)
-print("-" * 30)
+    if os.path.exists(ALERT_FILE):
+        df = pd.read_csv(ALERT_FILE)
+        df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
+    else:
+        df = pd.DataFrame([record])
+
+    df.to_csv(ALERT_FILE, index=False)
+
+    color = COLORS[level]
+    reset = COLORS["RESET"]
+    print(f"\n{color}{'='*36}{reset}")
+    print(f"{color}  TRAFFIC ALERT GENERATED{reset}")
+    print(f"{color}{'='*36}{reset}")
+    print(f"  Timestamp     : {record['Timestamp']}")
+    print(f"  Total vehicles: {record['Total Vehicles']}")
+    print(f"{color}  Status        : {level} TRAFFIC{reset}")
+    print(f"{'='*36}")
+    print(f"[OK]  Saved to: {ALERT_FILE}  (row {len(df)})")
+
+    return record
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--total", type=int, default=None,
+                        help="Override total — otherwise read from history CSV")
+    args = parser.parse_args()
+
+    if args.total is not None:
+        total = args.total
+    elif os.path.exists(HISTORY_FILE):
+        df    = pd.read_csv(HISTORY_FILE)
+        total = int(df.iloc[-1]["Total"])
+        print(f"[INFO]  Read latest history: {total} vehicles")
+    else:
+        print("[ERROR] No history file found. Run vehicle_analytics.py first,")
+        print("        or pass --total <number>.")
+        raise SystemExit(1)
+
+    generate_alert(total)
